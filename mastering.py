@@ -18,7 +18,7 @@ matplotlib.use('Agg')  # Use a non-interactive backend for matplotlib
 import matplotlib.pyplot as plt
 import io
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-import pyaudio
+import pygame
 
 # ==== Logging Setup ====
 logging.basicConfig(level=logging.DEBUG,  # Set to DEBUG to see all logs
@@ -28,10 +28,14 @@ logging.basicConfig(level=logging.DEBUG,  # Set to DEBUG to see all logs
                         logging.StreamHandler(sys.stdout)  # Also log to console
                     ])
 
+# Initialize Pygame Mixer
+pygame.mixer.init()
+
 # ==== GUI Setup ====
 root = tk.Tk()
 root.title("Audio Mastering Tool")
 root.geometry("1200x800")
+root.minsize(1200, 800)  # Set minimum window size
 root.configure(bg='#f0f0f0')  # Light background for a modern look
 
 # Apply a custom style to ttk widgets
@@ -84,11 +88,7 @@ update_queue = queue.Queue()
 
 # Playback variables
 is_playing = False
-playback_thread = None
-playback_position = 0  # in samples
-playback_lock = threading.Lock()
-pyaudio_instance = None
-stream = None
+is_paused = False
 volume = tk.DoubleVar(value=0.5)
 elapsed_time = tk.StringVar(value="00:00")
 total_duration = tk.StringVar(value="00:00")
@@ -142,6 +142,9 @@ info_frame.pack(fill='both', expand=True)
 media_frame = ttk.Frame(right_frame, padding=10, style='TFrame')
 media_frame.pack(fill='x')
 
+# Initialize waveform_label
+waveform_label = None
+
 # Butterworth Filter functions for low, mid, high bands
 def butter_band_filter(data, cutoff, fs, btype, order=5):
     nyquist = 0.5 * fs
@@ -178,7 +181,7 @@ def choose_file():
 
 # Display audio file information
 def display_info():
-    global audio_path, audio_data, sr, duration
+    global audio_path, audio_data, sr, duration, waveform_label
     if audio_path:
         try:
             audio_data, sr = sf.read(audio_path, always_2d=True)
@@ -198,22 +201,27 @@ def display_info():
             ttk.Label(info_frame, text=f"Channels: {channels}", font=("Helvetica", 12)).pack(anchor='w', pady=5)
             ttk.Label(info_frame, text=f"Duration: {duration:.2f} seconds", font=("Helvetica", 12)).pack(anchor='w', pady=5)
 
-            # Show waveform
-            show_waveform(audio_data, sr)
-
-            # Reset playback position
-            global playback_position
-            playback_position = 0
+            # Show initial waveform
+            update_waveform_display(audio_data, sr)
 
             # Update position slider
             position_slider.config(from_=0, to=duration)
             position_slider.set(0)
+
+            # Reset playback variables
+            stop_audio()
         except Exception as e:
             logging.error("Error loading audio file: %s", e)
             messagebox.showerror("Error", "Error loading audio file.")
 
-# Function to show waveform
-def show_waveform(data, sample_rate):
+# Function to update waveform display
+def update_waveform_display(data, sample_rate):
+    global waveform_label
+
+    # Remove the existing waveform label if it exists
+    if waveform_label is not None:
+        waveform_label.destroy()
+
     # Convert stereo to mono if necessary
     if data.shape[1] > 1:
         data = np.mean(data, axis=1)
@@ -236,7 +244,7 @@ def show_waveform(data, sample_rate):
     img_tk = ImageTk.PhotoImage(img)
     waveform_label = ttk.Label(info_frame, image=img_tk)
     waveform_label.image = img_tk  # Keep a reference to prevent garbage collection
-    waveform_label.pack(pady=5)
+    waveform_label.pack(pady=5, fill='both', expand=True)
 
 # Analyze audio and display recommendations
 def analyze_audio():
@@ -297,7 +305,7 @@ def show_power_spectrum(freqs, power_spectrum):
     img_tk = ImageTk.PhotoImage(img)
     spectrum_label = ttk.Label(info_frame, image=img_tk)
     spectrum_label.image = img_tk  # Keep a reference to prevent garbage collection
-    spectrum_label.pack(pady=5)
+    spectrum_label.pack(pady=5, fill='both', expand=True)
 
 def adjust_mastering_settings(audio_mono, rms_amplitude, peak_amplitude):
     # Analyze frequency bands
@@ -429,109 +437,158 @@ def master_audio():
 
     threading.Thread(target=_master).start()
 
-# Media Player Controls using Threading
+# Preview Changes function
+def preview_changes():
+    global audio_data, sr
+    if audio_data is None:
+        logging.warning("No audio file loaded to preview.")
+        messagebox.showwarning("Warning", "Please select an audio file first.")
+        return
+
+    def _preview():
+        try:
+            # Copy the audio data to avoid modifying the original
+            preview_audio = np.copy(audio_data)
+
+            # Apply Noise Reduction
+            if apply_noise_reduction.get():
+                logging.info("Applying noise reduction for preview...")
+                for channel in range(preview_audio.shape[1]):
+                    preview_audio[:, channel] = nr.reduce_noise(
+                        y=preview_audio[:, channel],
+                        sr=sr,
+                        prop_decrease=noise_reduction_strength.get()
+                    )
+
+            # Apply EQ
+            if apply_eq.get():
+                logging.info("Applying equalization for preview...")
+                for channel in range(preview_audio.shape[1]):
+                    low_adj = butter_band_filter(
+                        preview_audio[:, channel], 200, sr, btype='low'
+                    ) * low_gain.get()
+                    mid_adj = butter_band_filter(
+                        preview_audio[:, channel], [200, 5000], sr, btype='band'
+                    ) * mid_gain.get()
+                    high_adj = butter_band_filter(
+                        preview_audio[:, channel], 5000, sr, btype='high'
+                    ) * high_gain.get()
+                    preview_audio[:, channel] = low_adj + mid_adj + high_adj
+
+            # Apply Compression
+            if apply_compression_var.get():
+                logging.info("Applying compression for preview...")
+                threshold = compression_threshold.get()
+                ratio = compression_ratio.get()
+                for channel in range(preview_audio.shape[1]):
+                    preview_audio[:, channel] = apply_compression(
+                        preview_audio[:, channel], threshold, ratio
+                    )
+
+            # Apply Loudness Normalization
+            if apply_loudness_norm.get():
+                logging.info("Applying loudness normalization for preview...")
+                meter = pyln.Meter(sr)
+                loudness = meter.integrated_loudness(preview_audio)
+                preview_audio = pyln.normalize.loudness(
+                    preview_audio, loudness, target_loudness.get()
+                )
+
+            # Update the waveform display
+            update_waveform_display(preview_audio, sr)
+            logging.info("Preview updated.")
+        except Exception as e:
+            logging.error("Error during preview: %s", e)
+            messagebox.showerror("Error", "An error occurred during preview.")
+
+    threading.Thread(target=_preview).start()
+
+# Optional: Bind mastering controls to update waveform automatically
+def on_mastering_control_change(*args):
+    # Debounce to prevent excessive updates
+    if hasattr(on_mastering_control_change, 'after_id'):
+        root.after_cancel(on_mastering_control_change.after_id)
+    on_mastering_control_change.after_id = root.after(500, preview_changes)
+
+# Bind variables
+for var in [
+    noise_reduction_strength,
+    low_gain,
+    mid_gain,
+    high_gain,
+    compression_threshold,
+    compression_ratio,
+    target_loudness,
+    apply_noise_reduction,
+    apply_eq,
+    apply_compression_var,
+    apply_loudness_norm
+]:
+    var.trace_add('write', on_mastering_control_change)
+
+# Media Player Controls using pygame
 def toggle_play_pause():
-    if is_playing:
+    global is_playing, is_paused
+    if is_playing and not is_paused:
         pause_audio()
     else:
         play_audio()
 
 def play_audio():
-    global is_playing, playback_thread
-    if audio_data is None:
+    global is_playing, is_paused
+    if audio_path is None:
         logging.warning("No audio file loaded to play.")
         messagebox.showwarning("Warning", "Please select an audio file first.")
         return
+
     if not is_playing:
         is_playing = True
+        is_paused = False
         play_pause_button.config(image=pause_icon)
-        playback_thread = threading.Thread(target=playback_loop, daemon=True)
-        playback_thread.start()
+        try:
+            pygame.mixer.music.load(audio_path)
+            pygame.mixer.music.set_volume(volume.get())
+            pygame.mixer.music.play()
+            update_playback_position()
+            logging.info("Playback started.")
+        except Exception as e:
+            logging.error("Error starting playback: %s", e)
+            messagebox.showerror("Error", "Failed to play audio.")
+            is_playing = False
+            play_pause_button.config(image=play_icon)
+    elif is_paused:
+        is_paused = False
+        play_pause_button.config(image=pause_icon)
+        pygame.mixer.music.unpause()
         update_playback_position()
-        logging.info("Playback started.")
+        logging.info("Playback resumed.")
 
 def pause_audio():
-    global is_playing
-    if is_playing:
-        is_playing = False
+    global is_paused
+    if is_playing and not is_paused:
+        is_paused = True
         play_pause_button.config(image=play_icon)
+        pygame.mixer.music.pause()
         logging.info("Playback paused.")
 
 def stop_audio():
-    global is_playing, playback_position
+    global is_playing, is_paused
     if is_playing:
         is_playing = False
+        is_paused = False
+        pygame.mixer.music.stop()
+        play_pause_button.config(image=play_icon)
+        position_slider.set(0)
+        elapsed_time.set("00:00")
         logging.info("Playback stopped.")
-    playback_position = 0
-    position_slider.set(0)
-    elapsed_time.set("00:00")
-    play_pause_button.config(image=play_icon)
-
-def playback_loop():
-    global playback_position, is_playing, pyaudio_instance, stream
-    try:
-        with playback_lock:
-            data = audio_data
-            fs = sr
-
-            # Prepare audio data
-            audio = data * volume.get()
-            audio_int16 = (audio * 32767).astype(np.int16)
-            num_channels = data.shape[1]
-
-            # Initialize PyAudio
-            pyaudio_instance = pyaudio.PyAudio()
-
-            def callback(in_data, frame_count, time_info, status):
-                global playback_position
-                if not is_playing or playback_position >= len(audio_int16):
-                    return (None, pyaudio.paComplete)
-
-                end_position = min(playback_position + frame_count, len(audio_int16))
-                frames = audio_int16[playback_position:end_position]
-
-                # Update playback position
-                playback_position = end_position
-
-                # Update the position slider and time display
-                current_time = playback_position / fs
-                root.after(0, update_playback_position)
-
-                # Interleave channels if necessary
-                if num_channels > 1:
-                    frames = frames.reshape(-1)
-                else:
-                    frames = frames.flatten()
-
-                return (frames.tobytes(), pyaudio.paContinue)
-
-            stream = pyaudio_instance.open(format=pyaudio.paInt16,
-                                           channels=num_channels,
-                                           rate=fs,
-                                           output=True,
-                                           stream_callback=callback)
-
-            stream.start_stream()
-
-            # Keep the thread alive while the stream is active
-            while stream.is_active():
-                time.sleep(0.1)
-
-            stream.stop_stream()
-            stream.close()
-            pyaudio_instance.terminate()
-            is_playing = False
-            root.after(0, play_pause_button.config, {'image': play_icon})
-
-    except Exception as e:
-        logging.error("Error during playback: %s", e)
-        update_queue.put(lambda: messagebox.showerror("Playback Error", f"An error occurred during playback:\n{e}"))
-        is_playing = False
-        root.after(0, play_pause_button.config, {'image': play_icon})
 
 def update_playback_position():
-    if is_playing:
-        current_time = playback_position / sr
+    if is_playing and not is_paused:
+        current_time = pygame.mixer.music.get_pos() / 1000.0
+        if current_time < 0:
+            # Playback has finished
+            stop_audio()
+            return
         mins, secs = divmod(current_time, 60)
         elapsed_time.set(f"{int(mins):02d}:{int(secs):02d}")
         position_slider.set(current_time)
@@ -540,22 +597,24 @@ def update_playback_position():
         play_pause_button.config(image=play_icon)
 
 def set_playback_position(value):
-    global playback_position, is_playing
-    if audio_data is None:
+    global is_playing, is_paused
+    if audio_path is None:
         return
-    with playback_lock:
-        new_position = int(float(value) * sr)
-        playback_position = new_position
-        current_time = playback_position / sr
-        mins, secs = divmod(current_time, 60)
-        elapsed_time.set(f"{int(mins):02d}:{int(secs):02d}")
-        if is_playing:
-            # Restart playback from the new position
-            pause_audio()
-            play_audio()
+    new_position = float(value)
+    try:
+        pygame.mixer.music.play(start=new_position)
+        pygame.mixer.music.set_volume(volume.get())
+        if not is_playing:
+            is_playing = True
+            is_paused = False
+            play_pause_button.config(image=pause_icon)
+        logging.info(f"Playback position set to {new_position} seconds.")
+    except Exception as e:
+        logging.error("Error setting playback position: %s", e)
 
 def set_volume(value):
     volume.set(float(value))
+    pygame.mixer.music.set_volume(volume.get())
 
 # Update the UI in a thread-safe manner
 def process_queue():
@@ -579,7 +638,7 @@ start_button.pack(side='left', padx=10, pady=10)
 
 # Selected File Label (will be updated when a file is chosen)
 selected_file_label = ttk.Label(top_frame, text="No file selected.", font=("Helvetica", 14))
-selected_file_label.pack(pady=10)
+selected_file_label.pack(pady=10, fill='x')
 
 # Info Frame (now under Selected File Label)
 # The info_frame will be populated when an audio file is loaded
@@ -652,7 +711,12 @@ sliders = [
 
 for idx, (label_text, var, min_val, max_val) in enumerate(sliders):
     ttk.Label(controls_box, text=label_text, font=("Helvetica", 12)).grid(row=idx, column=0, padx=5, pady=5, sticky='e')
-    ttk.Scale(controls_box, from_=min_val, to=max_val, orient=tk.HORIZONTAL, variable=var, length=300).grid(row=idx, column=1, padx=5, pady=5, sticky='w')
+    scale = ttk.Scale(controls_box, from_=min_val, to=max_val, orient=tk.HORIZONTAL, variable=var, length=300)
+    scale.grid(row=idx, column=1, padx=5, pady=5, sticky='we')
+    controls_box.columnconfigure(1, weight=1)
+    # Display the current value
+    value_label = ttk.Label(controls_box, textvariable=var, width=5)
+    value_label.grid(row=idx, column=2, padx=5, pady=5, sticky='w')
 
 # Apply Effects Box (Aligned using grid)
 apply_effects_box = ttk.LabelFrame(controls_frame, text="Apply Effects", padding=20, style='TFrame')
@@ -669,6 +733,11 @@ effects = [
 for idx, (effect_name, effect_var, effect_desc) in enumerate(effects):
     ttk.Checkbutton(apply_effects_box, text=effect_name, variable=effect_var).grid(row=idx, column=0, sticky='w', padx=5, pady=5)
     ttk.Label(apply_effects_box, text=effect_desc, font=('Helvetica', 10), foreground='#555555').grid(row=idx, column=1, sticky='w', padx=5, pady=5)
+    apply_effects_box.columnconfigure(1, weight=1)
+
+# Preview Changes Button
+preview_button = ttk.Button(controls_frame, text="Preview Changes", command=preview_changes, style='Normal.TButton')
+preview_button.pack(pady=10)
 
 # Start the main loop
 root.mainloop()
