@@ -14,11 +14,11 @@ import queue
 import sys
 import time
 import matplotlib
+import pygame
 matplotlib.use('Agg')  # Use a non-interactive backend for matplotlib
 import matplotlib.pyplot as plt
 import io
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-import pygame
 
 # ==== Logging Setup ====
 logging.basicConfig(level=logging.DEBUG,  # Set to DEBUG to see all logs
@@ -36,35 +36,34 @@ root = tk.Tk()
 root.title("Audio Mastering Tool")
 root.geometry("1200x800")
 root.minsize(1200, 800)  # Set minimum window size
-root.configure(bg='#f0f0f0')  # Light background for a modern look
+root.configure(bg='#2b2b2b')  # Dark background for modern look
 
 # Apply a custom style to ttk widgets
 style = ttk.Style(root)
 style.theme_use('clam')
 
 # Define custom colors for a modern look
-primary_color = '#0078D7'  # Modern blue
-secondary_color = '#005A9E'  # Darker blue
-background_color = '#f0f0f0'  # Light background
-foreground_color = '#000000'  # Black text
+primary_color = '#3c3f41'  # Dark gray
+secondary_color = '#d3d3d3'  # Light gray
+accent_color = '#00bfff'  # Sky blue
+background_color = '#2b2b2b'  # Dark background
+foreground_color = '#ffffff'  # White text
 
 # Configure styles
 style.configure('TFrame', background=background_color)
 style.configure('TLabel', background=background_color, foreground=foreground_color, font=('Helvetica', 12))
-style.configure('TButton', font=('Helvetica', 12), padding=10)
+style.configure('TButton', background=primary_color, foreground=foreground_color, font=('Helvetica', 12), padding=10)
 style.configure('TCheckbutton', background=background_color, foreground=foreground_color, font=('Helvetica', 10))
 style.configure('Horizontal.TScale', background=background_color)
+style.configure('TLabelFrame', background=background_color, foreground=foreground_color)
+style.configure('TSeparator', background=foreground_color)
+style.configure('Horizontal.TProgressbar', troughcolor=primary_color, background=accent_color, bordercolor=primary_color)
 
 # Create custom styles for buttons
-style.configure('Normal.TButton',
-                background=primary_color,
-                foreground='white',
-                borderwidth=1,
-                focusthickness=3,
-                focuscolor='none')
-style.map('Normal.TButton',
-          background=[('active', secondary_color), ('disabled', '#d9d9d9')],
-          foreground=[('disabled', '#a3a3a3')])
+style.map('TButton',
+          background=[('active', accent_color), ('!active', primary_color)],
+          foreground=[('active', foreground_color)],
+          relief=[('pressed', 'sunken'), ('!pressed', 'raised')])
 
 # Load icons for media player buttons
 try:
@@ -93,6 +92,8 @@ volume = tk.DoubleVar(value=0.5)
 elapsed_time = tk.StringVar(value="00:00")
 total_duration = tk.StringVar(value="00:00")
 duration = 0  # Total duration in seconds
+playback_start_time = 0  # Time when playback started
+paused_time = 0  # Time when playback was paused
 
 # Mastering settings
 noise_reduction_strength = tk.DoubleVar(value=1.0)
@@ -110,36 +111,36 @@ apply_compression_var = tk.IntVar(value=1)
 apply_loudness_norm = tk.IntVar(value=1)
 
 # Progress bar
-progress = ttk.Progressbar(root, orient="horizontal", mode="determinate", style='blue.Horizontal.TProgressbar')
-style.configure('blue.Horizontal.TProgressbar', troughcolor='#e6e6e6', bordercolor='#e6e6e6',
-                background=primary_color, lightcolor=primary_color, darkcolor=primary_color)
+progress = ttk.Progressbar(root, orient="horizontal", mode="determinate")
+style.configure('blue.Horizontal.TProgressbar', troughcolor=primary_color, bordercolor=primary_color,
+                background=accent_color, lightcolor=accent_color, darkcolor=accent_color)
 
 # Frames for better layout
-main_frame = ttk.Frame(root, padding=10, style='TFrame')
+main_frame = ttk.Frame(root, padding=10)
 main_frame.pack(fill='both', expand=True)
 
 # Divide the main_frame into left and right frames (each 50% width)
-left_frame = ttk.Frame(main_frame, padding=10, style='TFrame')
+left_frame = ttk.Frame(main_frame, padding=10)
 left_frame.pack(side='left', fill='both', expand=True)
 
-right_frame = ttk.Frame(main_frame, padding=10, style='TFrame')
+right_frame = ttk.Frame(main_frame, padding=10)
 right_frame.pack(side='right', fill='both', expand=True)
 
 # Frames inside left_frame
-controls_frame = ttk.Frame(left_frame, padding=10, style='TFrame')
+controls_frame = ttk.Frame(left_frame, padding=10)
 controls_frame.pack(fill='both', expand=True)
 
-progress_frame = ttk.Frame(left_frame, padding=10, style='TFrame')
+progress_frame = ttk.Frame(left_frame, padding=10)
 progress_frame.pack(fill='x')
 
 # Frames inside right_frame
-top_frame = ttk.Frame(right_frame, padding=10, style='TFrame')
+top_frame = ttk.Frame(right_frame, padding=10)
 top_frame.pack(fill='x')
 
-info_frame = ttk.Frame(right_frame, padding=10, style='TFrame')
+info_frame = ttk.Frame(right_frame, padding=10)
 info_frame.pack(fill='both', expand=True)
 
-media_frame = ttk.Frame(right_frame, padding=10, style='TFrame')
+media_frame = ttk.Frame(right_frame, padding=10)
 media_frame.pack(fill='x')
 
 # Initialize waveform_label
@@ -181,7 +182,7 @@ def choose_file():
 
 # Display audio file information
 def display_info():
-    global audio_path, audio_data, sr, duration, waveform_label
+    global audio_path, audio_data, sr, duration, waveform_label, playback_start_time, paused_time
     if audio_path:
         try:
             audio_data, sr = sf.read(audio_path, always_2d=True)
@@ -204,12 +205,12 @@ def display_info():
             # Show initial waveform
             update_waveform_display(audio_data, sr)
 
-            # Update position slider
-            position_slider.config(from_=0, to=duration)
-            position_slider.set(0)
-
             # Reset playback variables
             stop_audio()
+            playback_start_time = 0
+            paused_time = 0
+            elapsed_time.set("00:00")
+            position_slider.set(0)
         except Exception as e:
             logging.error("Error loading audio file: %s", e)
             messagebox.showerror("Error", "Error loading audio file.")
@@ -229,11 +230,15 @@ def update_waveform_display(data, sample_rate):
     fig = plt.Figure(figsize=(8, 2), dpi=100)
     ax = fig.add_subplot(111)
     times = np.arange(len(data)) / sample_rate
-    ax.plot(times, data)
-    ax.set_xlabel('Time (s)')
-    ax.set_ylabel('Amplitude')
-    ax.set_title('Waveform')
+    ax.plot(times, data, color=accent_color)
+    ax.set_xlabel('Time (s)', color=foreground_color)
+    ax.set_ylabel('Amplitude', color=foreground_color)
+    ax.set_title('Waveform', color=foreground_color)
     ax.set_xlim([0, times[-1]])
+    ax.tick_params(axis='x', colors=foreground_color)
+    ax.tick_params(axis='y', colors=foreground_color)
+    fig.patch.set_facecolor(background_color)
+    ax.set_facecolor(primary_color)
 
     # Convert plot to image and display in Tkinter
     canvas = FigureCanvas(fig)
@@ -289,12 +294,16 @@ def calculate_power_spectrum(data, sample_rate):
 def show_power_spectrum(freqs, power_spectrum):
     fig = plt.Figure(figsize=(8, 2), dpi=100)
     ax = fig.add_subplot(111)
-    ax.plot(freqs, power_spectrum)
-    ax.set_xlabel('Frequency (Hz)')
-    ax.set_ylabel('Magnitude')
-    ax.set_title('Power Spectrum')
+    ax.plot(freqs, power_spectrum, color=accent_color)
+    ax.set_xlabel('Frequency (Hz)', color=foreground_color)
+    ax.set_ylabel('Magnitude', color=foreground_color)
+    ax.set_title('Power Spectrum', color=foreground_color)
     ax.set_xlim([0, np.max(freqs)])
     ax.set_ylim([0, np.max(power_spectrum)])
+    ax.tick_params(axis='x', colors=foreground_color)
+    ax.tick_params(axis='y', colors=foreground_color)
+    fig.patch.set_facecolor(background_color)
+    ax.set_facecolor(primary_color)
 
     # Convert plot to image and display in Tkinter
     canvas = FigureCanvas(fig)
@@ -528,93 +537,129 @@ for var in [
 
 # Media Player Controls using pygame
 def toggle_play_pause():
-    global is_playing, is_paused
-    if is_playing and not is_paused:
-        pause_audio()
+    global is_playing, is_paused, playback_thread, playback_stop_event, playback_pause_event
+    if is_playing:
+        if not is_paused:
+            pause_audio()
+        else:
+            resume_audio()
     else:
         play_audio()
 
 def play_audio():
-    global is_playing, is_paused
+    global is_playing, is_paused, playback_thread, playback_stop_event, playback_pause_event, playback_start_time
     if audio_path is None:
         logging.warning("No audio file loaded to play.")
         messagebox.showwarning("Warning", "Please select an audio file first.")
         return
 
-    if not is_playing:
-        is_playing = True
+    is_playing = True
+    is_paused = False
+    play_pause_button.config(image=pause_icon)
+    playback_stop_event.clear()
+    playback_pause_event.clear()
+    playback_thread = threading.Thread(target=playback_loop, daemon=True)
+    playback_thread.start()
+    playback_start_time = time.time() - playback_position.get()
+    logging.info("Playback started.")
+
+def playback_loop():
+    global is_playing, is_paused, playback_start_time
+    try:
+        pygame.mixer.music.load(audio_path)
+        pygame.mixer.music.set_volume(volume.get())
+        pygame.mixer.music.play(start=playback_position.get())
+
+        while is_playing:
+            if playback_stop_event.is_set():
+                pygame.mixer.music.stop()
+                break
+            if playback_pause_event.is_set():
+                pygame.mixer.music.pause()
+                is_paused = True
+                play_pause_button.config(image=play_icon)
+                while playback_pause_event.is_set():
+                    time.sleep(0.1)
+                pygame.mixer.music.unpause()
+                is_paused = False
+                play_pause_button.config(image=pause_icon)
+                playback_start_time = time.time() - playback_position.get()
+
+            # Update playback position
+            current_time = pygame.mixer.music.get_pos() / 1000.0  # get_pos returns milliseconds
+            playback_position.set(current_time)
+            mins, secs = divmod(current_time, 60)
+            elapsed_time.set(f"{int(mins):02d}:{int(secs):02d}")
+            time.sleep(0.5)
+
+            # Check if playback has finished
+            if not pygame.mixer.music.get_busy():
+                break
+
+        # Playback finished
+        is_playing = False
         is_paused = False
-        play_pause_button.config(image=pause_icon)
-        try:
-            pygame.mixer.music.load(audio_path)
-            pygame.mixer.music.set_volume(volume.get())
-            pygame.mixer.music.play()
-            update_playback_position()
-            logging.info("Playback started.")
-        except Exception as e:
-            logging.error("Error starting playback: %s", e)
-            messagebox.showerror("Error", "Failed to play audio.")
-            is_playing = False
-            play_pause_button.config(image=play_icon)
-    elif is_paused:
+        play_pause_button.config(image=play_icon)
+        playback_position.set(0)
+        elapsed_time.set("00:00")
+        logging.info("Playback finished.")
+    except Exception as e:
+        logging.error("Error during playback: %s", e)
+        messagebox.showerror("Error", "An error occurred during playback.")
+        is_playing = False
         is_paused = False
-        play_pause_button.config(image=pause_icon)
-        pygame.mixer.music.unpause()
-        update_playback_position()
-        logging.info("Playback resumed.")
+        play_pause_button.config(image=play_icon)
 
 def pause_audio():
     global is_paused
     if is_playing and not is_paused:
         is_paused = True
+        playback_pause_event.set()
         play_pause_button.config(image=play_icon)
-        pygame.mixer.music.pause()
         logging.info("Playback paused.")
+
+def resume_audio():
+    global is_paused
+    if is_playing and is_paused:
+        is_paused = False
+        playback_pause_event.clear()
+        play_pause_button.config(image=pause_icon)
+        logging.info("Playback resumed.")
 
 def stop_audio():
     global is_playing, is_paused
     if is_playing:
         is_playing = False
         is_paused = False
-        pygame.mixer.music.stop()
+        playback_stop_event.set()
         play_pause_button.config(image=play_icon)
-        position_slider.set(0)
+        playback_position.set(0)
         elapsed_time.set("00:00")
         logging.info("Playback stopped.")
 
-def update_playback_position():
-    if is_playing and not is_paused:
-        current_time = pygame.mixer.music.get_pos() / 1000.0
-        if current_time < 0:
-            # Playback has finished
-            stop_audio()
-            return
-        mins, secs = divmod(current_time, 60)
-        elapsed_time.set(f"{int(mins):02d}:{int(secs):02d}")
-        position_slider.set(current_time)
-        root.after(500, update_playback_position)
-    else:
-        play_pause_button.config(image=play_icon)
-
 def set_playback_position(value):
-    global is_playing, is_paused
+    global is_playing, is_paused, playback_start_time
     if audio_path is None:
         return
-    new_position = float(value)
     try:
-        pygame.mixer.music.play(start=new_position)
-        pygame.mixer.music.set_volume(volume.get())
-        if not is_playing:
-            is_playing = True
-            is_paused = False
-            play_pause_button.config(image=pause_icon)
-        logging.info(f"Playback position set to {new_position} seconds.")
+        new_position = float(value)
+        playback_position.set(new_position)
+        if is_playing:
+            pygame.mixer.music.stop()
+            pygame.mixer.music.play(start=new_position)
+            playback_start_time = time.time() - new_position
+            logging.info(f"Playback position set to {new_position:.3f} seconds.")
     except Exception as e:
         logging.error("Error setting playback position: %s", e)
 
-def set_volume(value):
+def set_volume_control(value):
     volume.set(float(value))
     pygame.mixer.music.set_volume(volume.get())
+
+# Playback control variables
+playback_position = tk.DoubleVar(value=0.0)
+playback_stop_event = threading.Event()
+playback_pause_event = threading.Event()
 
 # Update the UI in a thread-safe manner
 def process_queue():
@@ -631,28 +676,21 @@ process_queue()
 
 # GUI Layout
 # Audio File Controls (in top_frame of right_frame)
-choose_button = ttk.Button(top_frame, text="Choose Audio File", command=choose_file, style='Normal.TButton')
+choose_button = ttk.Button(top_frame, text="Choose Audio File", command=choose_file)
 choose_button.pack(side='left', padx=10, pady=10)
-start_button = ttk.Button(top_frame, text="Start Mastering", command=master_audio, style='Normal.TButton')
+start_button = ttk.Button(top_frame, text="Start Mastering", command=master_audio)
 start_button.pack(side='left', padx=10, pady=10)
 
 # Selected File Label (will be updated when a file is chosen)
 selected_file_label = ttk.Label(top_frame, text="No file selected.", font=("Helvetica", 14))
 selected_file_label.pack(pady=10, fill='x')
 
-# Info Frame (now under Selected File Label)
-# The info_frame will be populated when an audio file is loaded
-
 # Media Player Controls (Below the Info Frame in right_frame)
-media_box = ttk.LabelFrame(media_frame, text="Media Player", padding=10, style='TFrame')
+media_box = ttk.LabelFrame(media_frame, text="Media Player", padding=10)
 media_box.pack(fill='x', pady=10)
 
-# Variables for media player GUI
-elapsed_time.set("00:00")
-total_duration.set("00:00")
-
 # Time Labels
-time_frame = ttk.Frame(media_box, style='TFrame')
+time_frame = ttk.Frame(media_box)
 time_frame.pack(fill='x')
 
 elapsed_label = ttk.Label(time_frame, textvariable=elapsed_time)
@@ -662,17 +700,17 @@ remaining_label = ttk.Label(time_frame, textvariable=total_duration)
 remaining_label.pack(side='right')
 
 # Playback Position Slider
-position_slider = ttk.Scale(media_box, from_=0, to=1, orient=tk.HORIZONTAL, length=600, command=lambda v: set_playback_position(v))
+position_slider = ttk.Scale(media_box, from_=0, to=1, orient=tk.HORIZONTAL, length=600, variable=playback_position, command=lambda v: set_playback_position(v))
 position_slider.pack(pady=5, fill='x')
 
 # Control Buttons
-control_frame = ttk.Frame(media_box, style='TFrame')
+control_frame = ttk.Frame(media_box)
 control_frame.pack(pady=5)
 
 if play_icon and pause_icon and stop_icon:
-    play_pause_button = tk.Button(control_frame, image=play_icon, command=toggle_play_pause, bd=0)
+    play_pause_button = tk.Button(control_frame, image=play_icon, command=toggle_play_pause, bd=0, bg=background_color, activebackground=primary_color)
     play_pause_button.pack(side='left', padx=5)
-    stop_button = tk.Button(control_frame, image=stop_icon, command=stop_audio, bd=0)
+    stop_button = tk.Button(control_frame, image=stop_icon, command=stop_audio, bd=0, bg=background_color, activebackground=primary_color)
     stop_button.pack(side='left', padx=5)
 else:
     play_pause_button = ttk.Button(control_frame, text="Play/Pause", command=toggle_play_pause)
@@ -681,13 +719,12 @@ else:
     stop_button.pack(side='left', padx=5)
 
 # Volume Control
-volume_frame = ttk.Frame(media_box, style='TFrame')
+volume_frame = ttk.Frame(media_box)
 volume_frame.pack(pady=5, fill='x')
 
 volume_label = ttk.Label(volume_frame, text="Volume")
 volume_label.pack(side='left')
-
-volume_slider = ttk.Scale(volume_frame, from_=0.0, to=1.0, orient=tk.HORIZONTAL, length=200, command=lambda v: set_volume(v))
+volume_slider = ttk.Scale(volume_frame, from_=0.0, to=1.0, orient=tk.HORIZONTAL, length=200, variable=volume, command=lambda v: set_volume_control(v))
 volume_slider.set(volume.get())
 volume_slider.pack(side='left', padx=5)
 
@@ -695,7 +732,7 @@ volume_slider.pack(side='left', padx=5)
 progress.pack(fill="x", pady=5, in_=progress_frame)
 
 # Mastering Settings (in controls_frame of left_frame)
-controls_box = ttk.LabelFrame(controls_frame, text="Mastering Controls", padding=20, style='TFrame')
+controls_box = ttk.LabelFrame(controls_frame, text="Mastering Controls", padding=20)
 controls_box.pack(fill='both', expand=True)
 
 # Align labels and controls using grid
@@ -719,7 +756,7 @@ for idx, (label_text, var, min_val, max_val) in enumerate(sliders):
     value_label.grid(row=idx, column=2, padx=5, pady=5, sticky='w')
 
 # Apply Effects Box (Aligned using grid)
-apply_effects_box = ttk.LabelFrame(controls_frame, text="Apply Effects", padding=20, style='TFrame')
+apply_effects_box = ttk.LabelFrame(controls_frame, text="Apply Effects", padding=20)
 apply_effects_box.pack(fill='x', pady=10)
 
 # Add checkboxes with descriptions (Aligned using grid)
@@ -732,11 +769,11 @@ effects = [
 
 for idx, (effect_name, effect_var, effect_desc) in enumerate(effects):
     ttk.Checkbutton(apply_effects_box, text=effect_name, variable=effect_var).grid(row=idx, column=0, sticky='w', padx=5, pady=5)
-    ttk.Label(apply_effects_box, text=effect_desc, font=('Helvetica', 10), foreground='#555555').grid(row=idx, column=1, sticky='w', padx=5, pady=5)
+    ttk.Label(apply_effects_box, text=effect_desc, font=('Helvetica', 10), foreground=secondary_color).grid(row=idx, column=1, sticky='w', padx=5, pady=5)
     apply_effects_box.columnconfigure(1, weight=1)
 
 # Preview Changes Button
-preview_button = ttk.Button(controls_frame, text="Preview Changes", command=preview_changes, style='Normal.TButton')
+preview_button = ttk.Button(controls_frame, text="Preview Changes", command=preview_changes)
 preview_button.pack(pady=10)
 
 # Start the main loop
