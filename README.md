@@ -1,16 +1,18 @@
 Audio Mastering Tool
-A Python-based application with a graphical user interface (GUI) for mastering audio files. Apply noise reduction, equalization, compression, and loudness normalization effortlessly. Preview your edits using the integrated media player.
+
+A Python-based application with a graphical user interface (GUI) for mastering audio files. 
+Apply noise reduction, equalization, compression, and loudness normalization effortlessly. 
+Preview your edits using the integrated media player.
 
 ![image](https://github.com/user-attachments/assets/23aa3385-b48d-4bf7-ae75-a36f56f055f1)
 
 Installation
+
 Prerequisites
+
 Python: Version 3.6 or higher
-
 FFmpeg: Required for audio processing
-
 Install FFmpeg:
-
 Windows: Download from FFmpeg Downloads and add to your system PATH.
 macOS: Use Homebrew:
 bash
